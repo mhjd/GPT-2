@@ -94,3 +94,110 @@ class GPT(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+    def forward(self, idx):
+        # idx is of shape (B, T)
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        # forward the token and position embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # (T)
+        pos_emb = self.transformer.wpe(pos) # (T, n_embd)
+        tok_emb = self.transformer.wte(idx) # (B, T, n_embd)
+        x = tok_emb + pos_emb
+
+        for block in self.transformer.h:
+            x = block(x)
+
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x) # (B, T, vocab_size)
+        return logits 
+
+    @classmethod
+    def from_pretrained(cls):
+        """Loads pretrained smallest GPT-2 model weights from huggingface"""
+        from transformers import GPT2LMHeadModel
+
+        model_type = "gpt2"
+        print("loading weights from pretrained gpt: gpt2")
+        config_args = dict(n_layer=12, n_head=12, n_embd=768)
+        config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
+        config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
+
+        config = GPTConfig(**config_args)
+        model = GPT(config)
+
+        # exclude the causal attention mask from state dict keys 
+        sd = model.state_dict()
+        sd_keys = sd.keys()
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')]
+
+        # init a hf model
+        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
+        sd_hf = model_hf.state_dict()
+
+        # excluding hf causal attention mask buffers 
+        sd_keys_hf = sd_hf.keys()
+        excluded_suffixes = (".attn.masked_bias", ".attn.bias")
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith(excluded_suffixes)]
+
+        # Weights that must be transposed when loading from Hugging Face/OpenAI GPT-2
+        # because our model uses nn.Linear while the checkpoints use GPT-2's Conv1D format
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        for k in sd_keys_hf:
+            # Transpose weights stored in GPT-2's Conv1D format before copying into nn.Linear 
+            if any(k.endswith(w) for w in transposed):
+                assert sd_hf[k].shape[::-1] == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k].t())
+            else:
+                assert sd_hf[k].shape == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k])
+
+        return model
+
+num_return_sequences = 5
+max_length = 30
+
+model = GPT.from_pretrained()  
+model.eval()
+device = (
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available()
+    else "cpu"
+)
+
+model.to(device)
+
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hello, all of that is because of the")
+tokens = torch.tensor(tokens, dtype=torch.long)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+x = tokens.to(device)
+
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1) < max_length:
+    with torch.no_grad():
+        
+        logits = model(x) # (B, T, vocab_size)
+        # take the logits at the last position (so the next word)
+        logits = logits[:, -1, :] # (B, vocab_size)
+        probs = F.softmax(logits, dim=-1)
+        # get the top 50 probabiiltes 
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+        # select a token from the top 50 probabilities
+        ix = torch.multinomial(topk_probs, 1) # (B, 1)
+        # retrieve the corresponding indexes
+        xcol = torch.gather(topk_indices, - 1, ix) # (B, 1)
+        # append to the sequence
+        x = torch.cat((x, xcol), dim=1)
+
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
