@@ -1,8 +1,39 @@
 from dataclasses import dataclass
+import tiktoken
 import math
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T 
+
+        with open('input.txt', 'r') as f:
+            text = f.read()
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"Loaded {len(self.tokens)} tokens.")
+        print(f"1 epoch = {len(self.tokens) / (B * T)} batches")
+
+        # state
+        self.current_position = 0
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        # input and targets
+        x = (buf[:-1]).view(B, T) 
+        y = (buf[1:].view(B, T))
+
+        # increment position of the tensor
+        self.current_position += B*T 
+        # if next batch out of bounds, reset
+        if self.current_position + (B * T + 1) > len(self.tokens):
+            self.current_position = 0
+        return x, y
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -95,7 +126,22 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-    def forward(self, idx):
+        # the input embedding table is the projection matrix of the output
+        # at the beginning : token -> token vector 
+        # at the end : predicted vector -> comparison with vector tokens
+        # in both case, we use the table of token vector
+        self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self.__init__weights)
+    def  _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, targets=None):
         # idx is of shape (B, T)
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
@@ -110,7 +156,10 @@ class GPT(nn.Module):
 
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
-        return logits 
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
 
     @classmethod
     def from_pretrained(cls):
@@ -161,8 +210,10 @@ class GPT(nn.Module):
 num_return_sequences = 5
 max_length = 30
 
-model = GPT.from_pretrained()  
-model.eval()
+
+train_loader = DataLoaderLite(B=4, T=32)
+
+model = GPT(GPTConfig())  
 device = (
     "cuda" if torch.cuda.is_available()
     else "mps" if torch.backends.mps.is_available()
@@ -171,7 +222,18 @@ device = (
 
 model.to(device)
 
-import tiktoken
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(50):
+    x, y = train_loader.next_batch()
+    x, y = x.to(device), y.to(device)
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
+    print(f"step {i}, loss: {loss.item()}")
+
+import sys; sys.exit(0)
 enc = tiktoken.get_encoding('gpt2')
 tokens = enc.encode("Hello, all of that is because of the")
 tokens = torch.tensor(tokens, dtype=torch.long)
