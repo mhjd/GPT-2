@@ -43,7 +43,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         # Combine info coming from the different head attention
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
-
+        self.c_proj.NANOGPT_SCALE_INIT = 'foo'
         self.n_head = config.n_head
         self.n_embd = config.n_embd
 
@@ -51,6 +51,16 @@ class CausalSelfAttention(nn.Module):
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                              .view(1, 1 , config.block_size, config.block_size))
 
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.noraml_(module.weight, mean=0.0, std=0.02)
     def forward(self, x):
         # batch size, sequence length, dimensions (n_embd)
         B, T, C = x.size()
@@ -132,7 +142,7 @@ class GPT(nn.Module):
         # in both case, we use the table of token vector
         self.transformer.wte.weight = self.lm_head.weight
 
-        self.apply(self.__init__weights)
+        self.apply(self._init_weights)
     def  _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -207,11 +217,17 @@ class GPT(nn.Module):
 
         return model
 
+import time 
+
 num_return_sequences = 5
 max_length = 30
 
 
-train_loader = DataLoaderLite(B=4, T=32)
+train_loader = DataLoaderLite(B=1, T=128)
+# train_loader = DataLoaderLite(B=16, T=1024)
+
+# optimisation of matrix multiplication of Linear layer
+torch.set_float32_matmul_precision('high')
 
 model = GPT(GPTConfig())  
 device = (
@@ -222,16 +238,27 @@ device = (
 
 model.to(device)
 
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
+
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
+    # with torch.autocast(device_type=devince, dtype=torch.float16):
     logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"step {i}, loss: {loss.item()}")
+    # torch.cuda.synchronize()
+    t1 = time.time()
+    # time difference in ms
+    dt = (t1 - t0) * 1000
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 enc = tiktoken.get_encoding('gpt2')
