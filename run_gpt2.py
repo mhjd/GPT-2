@@ -230,6 +230,7 @@ train_loader = DataLoaderLite(B=2, T=512)
 torch.set_float32_matmul_precision('high')
 
 model = GPT(GPTConfig())  
+model = torch.compile(model)
 device = (
     "cuda" if torch.cuda.is_available()
     else "mps" if torch.backends.mps.is_available()
