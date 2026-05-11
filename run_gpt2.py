@@ -251,12 +251,26 @@ import os
 if os.environ.get("ENABLE_TORCH_COMPILE", "1") == "1":
     model = torch.compile(model)
 
-
+average_tps = 0
+max_steps = 50
+warmup_steps = 10
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+def get_lr(it):
+    # warmup
+    if it < warmup_steps:
+        return max_lr * (it+1) / warmup_steps
+    # after the optimisation
+    if it > max_steps:
+        return min_lr
+    # in between
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-average_tps = 0
-num_it = 50
-for i in range(num_it):
+for step in range(max_steps):
     t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
@@ -267,6 +281,10 @@ for i in range(num_it):
     # calculating the norm the parameters
     # so a potention high loss don't disrupt the model with a high gradient
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0 )
+    # determine and set dthe learning rate for this iteration
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
     if device == "cuda":
         torch.cuda.synchronize()
@@ -277,8 +295,8 @@ for i in range(num_it):
     dt = (t1 - t0) * 1000
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
     average_tps += tokens_per_sec
-    print(f"step {i}, loss: {loss.item()}, norm : {norm:.4f},  dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
-print(f"Average number of tok/sec : {average_tps / num_it}")
+    print(f"step {step}, loss: {loss.item()}, lr : {lr:.4f}, norm : {norm:.4f},  dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+print(f"Average number of tok/sec : {average_tps / max_steps}")
 
 import sys; sys.exit(0)
 enc = tiktoken.get_encoding('gpt2')
