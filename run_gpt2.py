@@ -253,7 +253,7 @@ if os.environ.get("ENABLE_TORCH_COMPILE", "1") == "1":
 
 
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 average_tps = 0
 num_it = 50
 for i in range(num_it):
@@ -264,6 +264,9 @@ for i in range(num_it):
     with torch.autocast(device_type=device, dtype=torch.bfloat16):
         logits, loss = model(x, y)
     loss.backward()
+    # calculating the norm the parameters
+    # so a potention high loss don't disrupt the model with a high gradient
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0 )
     optimizer.step()
     if device == "cuda":
         torch.cuda.synchronize()
@@ -274,7 +277,7 @@ for i in range(num_it):
     dt = (t1 - t0) * 1000
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
     average_tps += tokens_per_sec
-    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+    print(f"step {i}, loss: {loss.item()}, norm : {norm:.4f},  dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
 print(f"Average number of tok/sec : {average_tps / num_it}")
 
 import sys; sys.exit(0)
