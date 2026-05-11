@@ -254,18 +254,6 @@ num_return_sequences = 5
 max_length = 30
 
 
-total_batch_size = 524288 # 2**19, ~0.5M in number of tokens
-B = 16 # micro batch size
-T = 1024 # sequence length
-assert total_batch_size % (B * T) == 00, "make sure total_batch_size is divisible by B * T"
-grad_accum_steps = total_batch_size // (B * T)
-print(f"total desired batch size: {total_batch_size}")
-print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
-
-train_loader = DataLoaderLite(B=B, T=T)
-
-# optimisation of matrix multiplication of Linear layer
-torch.set_float32_matmul_precision('high')
 
 device = (
     "cuda" if torch.cuda.is_available()
@@ -273,11 +261,59 @@ device = (
     else "cpu"
 )
 
+#-----
+# Simple launch : python run_gpt2.py
+# DDP launch for X GPUs :
+# torchrun --standalone --nproc_per_node=X run_gpt2.py
+
+from torch.distributed import init_process_group, destroy_process_group
+import os
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+if ddp:
+    assert torch.cuda.is_available(), 'cuda is needed for ddp'
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0 
+else:
+    # vanilla, non-DDP run
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    # attempt to autodetect device
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    print(f"using device: {device}")
+
+
 torch.manual_seed(1337)
 if device == "cuda":
     torch.cuda.manual_seed(1337)
 
 
+total_batch_size = 524288 # 2**19, ~0.5M in number of tokens
+B = 16 # micro batch size
+T = 1024 # sequence length
+assert total_batch_size % (B * T * ddp_world_size) == 00, "make sure total_batch_size is divisible by B * T * ddp_world_size"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+if master_process:
+    print(f"total desired batch size: {total_batch_size}")
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+
+print(f"I'm a GPU {ddp_rank}")
+print('Bye')
+import sys; sys.exit(0)
+train_loader = DataLoaderLite(B=B, T=T)
+
+# optimisation of matrix multiplication of Linear layer
+torch.set_float32_matmul_precision('high')
 model = GPT(GPTConfig(vocab_size=50304))  
 
 model.to(device)
