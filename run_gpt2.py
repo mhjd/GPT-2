@@ -227,7 +227,7 @@ train_loader = DataLoaderLite(B=2, T=512)
 # train_loader = DataLoaderLite(B=16, T=1024)
 
 # optimisation of matrix multiplication of Linear layer
-# torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('high')
 
 model = GPT(GPTConfig())  
 device = (
@@ -245,7 +245,8 @@ if device == "cuda":
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 average_tps = 0
-for i in range(50):
+num_it = 50
+for i in range(num_it):
     t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
@@ -264,7 +265,7 @@ for i in range(50):
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
     average_tps += tokens_per_sec
     print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
-print(f"Average number of tok/sec : {average_tps}")
+print(f"Average number of tok/sec : {average_tps / num_it}")
 
 import sys; sys.exit(0)
 enc = tiktoken.get_encoding('gpt2')
