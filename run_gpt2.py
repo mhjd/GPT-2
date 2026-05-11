@@ -223,11 +223,11 @@ num_return_sequences = 5
 max_length = 30
 
 
-train_loader = DataLoaderLite(B=1, T=128)
+train_loader = DataLoaderLite(B=2, T=512)
 # train_loader = DataLoaderLite(B=16, T=1024)
 
 # optimisation of matrix multiplication of Linear layer
-torch.set_float32_matmul_precision('high')
+# torch.set_float32_matmul_precision('high')
 
 model = GPT(GPTConfig())  
 device = (
@@ -239,11 +239,12 @@ device = (
 model.to(device)
 
 torch.manual_seed(1337)
-if torch.cuda.is_available():
+if device == "cuda":
     torch.cuda.manual_seed(1337)
 
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+average_tps = 0
 for i in range(50):
     t0 = time.time()
     x, y = train_loader.next_batch()
@@ -253,12 +254,17 @@ for i in range(50):
     logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    # torch.cuda.synchronize()
+    if device == "cuda":
+        torch.cuda.synchronize()
+    if device == "mps":
+        torch.mps.synchronize()
     t1 = time.time()
     # time difference in ms
     dt = (t1 - t0) * 1000
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    average_tps += tokens_per_sec
     print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+print(f"Average number of tok/sec : {average_tps}")
 
 import sys; sys.exit(0)
 enc = tiktoken.get_encoding('gpt2')
