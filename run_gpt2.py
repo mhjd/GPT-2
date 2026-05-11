@@ -228,6 +228,7 @@ class GPT(nn.Module):
         param_dict = {pn: p for pn, p in self.named_parameters()}
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
         # splitting parameters between which should be weight-decayed, and those which shouldn't 
+        # weight decaying only 2 dimensional parameters, so embeddings and matrices that participating in Linear
         decay_params= [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
 
@@ -253,7 +254,15 @@ num_return_sequences = 5
 max_length = 30
 
 
-train_loader = DataLoaderLite(B=2, T=512)
+# total_batch_size = 524288 # 2**19, ~0.5M in number of tokens
+# B = 2 # micro batch size
+# T = 1024 # sequence length
+# assert total_batch_size % (B * T) == 00, "make sure total_batch_size is divisible by B * T"
+# grad_accum_steps = total_batch_size // (B * T)
+# print(f"total desired batch size: {total_batch_size}")
+# print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+
+train_loader = DataLoaderLite(B=16, T=1024)
 # train_loader = DataLoaderLite(B=16, T=1024)
 
 # optimisation of matrix multiplication of Linear layer
@@ -268,6 +277,7 @@ device = (
 torch.manual_seed(1337)
 if device == "cuda":
     torch.cuda.manual_seed(1337)
+
 
 model = GPT(GPTConfig(vocab_size=50304))  
 
@@ -294,7 +304,6 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (max_lr - min_lr)
 
-# optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
 for step in range(max_steps):
