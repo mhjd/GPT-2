@@ -246,7 +246,9 @@ if device == "cuda":
 model = GPT(GPTConfig())  
 
 model.to(device)
-model = torch.compile(model)
+import os
+if os.environ.get("ENABLE_TORCH_COMPILE", "1") == "1":
+    model = torch.compile(model)
 
 
 
