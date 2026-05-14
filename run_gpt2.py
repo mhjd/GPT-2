@@ -372,7 +372,7 @@ raw_model = unwrap_model(model)
 average_tps = 0
 warmup_steps = 715
 max_steps = 19073
-max_lr = 6e-4
+max_lr = 1e-3
 min_lr = max_lr * 0.1
 def get_lr(it):
     # warmup
@@ -388,7 +388,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 
-optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device_type)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=1e-3, device=device_type)
 
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
