@@ -43,6 +43,17 @@ class DataLoaderLite:
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
 
+    def state_dict(self):
+        return {
+            "current_shard": self.current_shard,
+            "base_position": self.current_position - self.B * self.T * self.process_rank,
+        }
+
+    def load_state_dict(self, state):
+        self.current_shard = state["current_shard"]
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = state["base_position"] + self.B * self.T * self.process_rank
+
     def next_batch(self):
         B, T = self.B, self.T
         buf = self.tokens[self.current_position : self.current_position+B*T+1]
@@ -272,6 +283,14 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
         
+# retrieve raw model
+def unwrap_model(model):
+    if hasattr(model, 'module'):
+        model = model.module
+    if hasattr(model, '_orig_mod'):
+        model = model._orig_mod
+    return model
+
 import time 
 
 num_return_sequences = 5
@@ -348,7 +367,7 @@ if os.environ.get("ENABLE_TORCH_COMPILE", "1") == "1":
 
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
-raw_model = model.module if ddp else model
+raw_model = unwrap_model(model)
 
 average_tps = 0
 warmup_steps = 715
@@ -368,13 +387,36 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (max_lr - min_lr)
 
+
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device_type)
 
-for step in range(max_steps):
+log_dir = "log"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log.txt")
+resume_training_path = os.path.join(log_dir, f"resume_training.pt")
+start_step = 0
+
+if os.path.exists(resume_training_path):
+    if master_process:
+        print(f"resuming training from {resume_training_path}")
+    resume_training = torch.load(resume_training_path, map_location=device)
+    raw_model.load_state_dict(resume_training["model"])
+    optimizer.load_state_dict(resume_training["optimizer"])
+    if "train_loader" in resume_training:
+        train_loader.load_state_dict(resume_training["train_loader"])
+    start_step = resume_training["step"]
+    torch.set_rng_state(resume_training["rng_state"])
+    if device_type == "cuda" and "cuda_rng_state" in resume_training:
+        torch.cuda.set_rng_state(resume_training["cuda_rng_state"])
+    if master_process:
+        print(f"resuming at step {start_step}")
+
+for step in range(start_step, max_steps):
     t0 = time.time()
+    last_step = (step == max_steps - 1)
 
     # calculate the loss time to time
-    if step % 100 == 0:
+    if step % 250 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -388,10 +430,34 @@ for step in range(max_steps):
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
             if ddp:
-                dist.all_reduce(val_loss_accum, op=dist.ReduceOPp.AVG)
+                dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
                 print(f"validation loss: {val_loss_accum.item():.4f}")
-
+                with open(log_file, "a") as f:
+                    f.write(f"{step} eval {val_loss_accum.item():.4f}\n")
+                if step > 0 and (step % 5000 == 0 or last_step):
+                    resume_training = {
+                        'model': raw_model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        'config': raw_model.config,
+                        'step': step,
+                        "train_loader": train_loader.state_dict(),
+                        "rng_state": torch.get_rng_state(),
+                    }
+                    if device_type == "cuda":
+                        resume_training["cuda_rng_state"] = torch.cuda.get_rng_state()
+                    torch.save(resume_training, resume_training_path)
+                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'config': raw_model.config,
+                    'step': step,
+                    'val_loss': val_loss_accum.item()
+                }
+                # you might also want to add optimizer.state_dict() and
+                # rng seeds etc., if you wanted to more exactly resume training
+                torch.save(checkpoint, checkpoint_path)
+    model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
     for micro_step in range (grad_accum_steps):
@@ -429,6 +495,8 @@ for step in range(max_steps):
     average_tps += tokens_per_sec
     if master_process:
         print(f"step {step}, loss_accum : {loss_accum.item():.6f}, loss: {loss.item()}, lr : {lr:.4f}, norm : {norm:.4f},  dt: {dt:.2f}s, tok/sec: {tokens_per_sec:.2f}")
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
 if master_process:
     print(f"Average number of tok/sec : {average_tps / max_steps}")
 
